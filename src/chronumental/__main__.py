@@ -16,9 +16,12 @@ import jax
 import numpyro.distributions as dist
 import numpyro.optim as optim
 from numpyro.infer import SVI, Trace_ELBO
-from numpyro.infer.autoguide import AutoDelta
+from numpyro.infer import autoguide 
+from numpyro.infer.initialization import init_to_value
 from . import models
+from . import models_fn
 from scipy import stats
+from numpyro import render_model
 
 try:
     from . import _version
@@ -57,10 +60,22 @@ def get_parser():
         required=True)
 
     parser.add_argument(
+        '--locations',
+        help=
+        'A metadata file with columns strain, location where location is an array of [lat, lon] in decimal date format ([ -17.808172, -41.786433])',
+        required=False
+    )
+    parser.add_argument(
         '--dates_out',
         default=None,
         type=str,
         help="Output for date tsv (otherwise will use default)")
+    
+    parser.add_argument(
+        '--locations_out',
+        default=None,
+        type=str,
+        help="Output for location tsv (otherwise will use default)")
 
     parser.add_argument('--tree_out',
                         default=None,
@@ -88,6 +103,14 @@ def get_parser():
         type=float,
         help=
         "Scale factor for date distribution. Essentially a measure of how uncertain we think the measured dates are."
+    )
+
+    parser.add_argument(
+        '--variance_location',
+        default=0.016667,
+        type=float,
+        help=
+        "Scale factor for location distribution. Essentially a measure of how uncertain we think the measured locations are."
     )
 
     parser.add_argument('--steps',
@@ -119,6 +142,7 @@ def get_parser():
 
     parser.add_argument('--model',
                         default="DeltaGuideWithStrictLearntClock",
+                        # default="phyloGeo",
                         type=str,
                         help="Model type to use")
 
@@ -140,6 +164,12 @@ def get_parser():
         action='store_true',
         help=("Will cause the clock rate to be exactly"
               " fixed at the value specified in clock, rather than learnt"))
+    
+    parser.add_argument(
+        '--RRW',
+        action='store_true',
+        help="Use a relaxed random clock with the reciprocal of the branch rates drawn from a Gamma(1/2,1/2)."
+    )
 
     parser.add_argument(
         '--use_gpu',
@@ -179,6 +209,19 @@ def get_parser():
         "Will force the model to always use the final parameters, rather than simply using those that gave the lowest loss"
     )
 
+    parser.add_argument(
+        '--log_every',
+        default=10,
+        type=int,
+        help='How often should we log to screen'
+    )
+    parser.add_argument(
+        '--auto_guide',
+        help='AutoGuide name to override defaults',
+        required=False,
+        default="AutoDelta"
+    )
+
     return parser
 
 
@@ -189,6 +232,12 @@ def prepend_to_file_name(full_path, to_prepend):
     else:
         return f"{to_prepend}_{full_path}"
 
+auto_guides={
+    "AutoMultivariateNormal":autoguide.AutoMultivariateNormal,
+    "AutoLowRankMultivariateNormal":autoguide.AutoLowRankMultivariateNormal,
+    "AutoLaplaceApproximation":autoguide.AutoLaplaceApproximation,
+    "AutoDelta":autoguide.AutoDelta
+}
 
 def main():
     parser = get_parser()
@@ -212,6 +261,10 @@ def main():
     if args.dates_out is None:
         args.dates_out = prepend_to_file_name(args.dates,
                                               "chronumental_dates") + ".tsv"
+    
+    if args.locations_out is None:
+        args.locations_out = prepend_to_file_name(args.dates,
+                                              "chronumental_locations") + ".tsv"
 
     if args.tree_out is None:
         args.tree_out = prepend_to_file_name(args.tree,
@@ -279,6 +332,8 @@ def main():
     cols = jnp.asarray(cols)
     print("Cols array created")
 
+    #TODO reintroduce fixed clock
+
     if args.clock:
         print(f"Using clock rate {args.clock}")
         clock_rate = args.clock
@@ -308,28 +363,97 @@ def main():
             "Clock rate is less than 1 mutation per year. This probably means you need to specify a genome_size with --treat_mutation_units_as_normalised_to_genome_size size. If you are sure that you do not, set that parameter to 1.0."
         )
 
-    model_configuration = {
-        "clock_rate": clock_rate,
-        "variance_dates": args.variance_dates,
-        "expected_min_between_transmissions":
-        args.expected_min_between_transmissions,
-        "enforce_exact_clock": args.enforce_exact_clock,
-        "variance_on_clock_rate": args.variance_on_clock_rate
-    }
+    initial_times = jnp.maximum(
+            365 * (branch_distances_array) / clock_rate,
+            args.expected_min_between_transmissions)
+    # Model config
+    location_data=None
+    location_config=None
+    locationModel=False
+    if args.locations is not None:
+        locationModel=True
+        locations = input_mod.get_locations(args.locations)
+        location_data = input_mod.process_trait_data(locations,reference_point,tree)
+        location_config={
+            'root_location_scale':1000,
+            "LKJ_concentration":1,
+            'RRW':args.RRW
+        }
 
-    my_model = models.models[args.model](
-        rows=rows,
-        cols=cols,
-        branch_distances_array=branch_distances_array,
-        terminal_target_dates_array=terminal_target_dates_array,
-        terminal_target_errors_array=terminal_target_errors_array,
-        ref_point_distance=ref_point_distance,
-        model_configuration=model_configuration)
+        location_dim = location_data["terminal_target_locations"][0].shape[0] ## always 2 for location, fish viruses or other cont traits might be 3...
+        
+
+        location_scale = jnp.array(args.variance_location)
+
+        if location_scale.size== 1 and location_dim>1:
+            location_scale = location_scale.repeat(location_dim)
+            print(f"Expanding location sampling variance to fill all dimensions ({location_dim})")
+        elif location_scale.shape[0]!= location_dim:
+            raise Exception(f"Error processing trait location. Trait has {location_dim} dimensions but scale only has {location_scale.shape[0]}")
+        location_config["location_scale"]=location_scale
+        location_config["sampling_covariance"] = jnp.outer(location_scale,location_scale)*jnp.identity(location_dim)
+        
+    branch_config=None
+    branch_data=None
+    branchModel=False
+    if args.dates is not None:
+        branchModel=True
+        branch_config={
+        "clock_rate": clock_rate,
+            "variance_dates": args.variance_dates,
+            "expected_min_between_transmissions":
+            args.expected_min_between_transmissions,
+            "enforce_exact_clock": args.enforce_exact_clock,
+            "variance_on_clock_rate": args.variance_on_clock_rate,
+
+        }
+        branch_data={
+            "branch_distances_array":branch_distances_array,
+            "terminal_target_errors_array":terminal_target_errors_array,
+            "terminal_target_dates_array":terminal_target_dates_array,
+            "rows":rows,
+            "cols":cols
+        }
+
+    guiderMaker= auto_guides[args.auto_guide] 
+
+    if locationModel and branchModel:
+        model = models_fn.combined_model
+        config={
+            "branchModel":branch_config,
+            "locationModel":location_config
+        }
+        data={"branchModel":branch_data,"locationModel":location_data}
+        guide = guiderMaker(model,init_loc_fn=init_to_value(values={"latent_time_length":initial_times,
+                                                           "root_date":-365*ref_point_distance/clock_rate,
+                                                           "latent_mutation_rate":clock_rate}))
+        logger = models_fn.CombinedModelLogger(guide,data)
+    elif locationModel:
+        model=models_fn.locationModel
+        config=location_config
+        data=location_data
+        guide = guiderMaker(model)
+        logger = models_fn.LocationModelLogger(guide,data)
+        #TODO pass in static branch times here for fixed tree
+    elif branchModel:
+        model=models_fn.branchModel
+        config=branch_config
+        data=branch_data 
+        guide = guiderMaker(model,init_loc_fn=init_to_value(values={"latent_time_length":initial_times,
+                                                           "root_date":-365*ref_point_distance/clock_rate,
+                                                           "latent_mutation_rate":clock_rate}))
+        logger = models_fn.BranchModelLogger(guide,data)
+    else:
+        raise ValueError("No data to model")
+
+
+    # render_model(model=model,filename="model.png",render_distributions=True,render_params=True,model_args=(config,data))
+    # render_model(model=guide,filename="guide.png",render_distributions=True,render_params=True,model_args=(config,data))
 
     print("Performing SVI:")
     optimiser = optim.ClippedAdam(
         args.lr) if args.clipped_adam else optim.Adam(args.lr)
-    svi = SVI(my_model.model, my_model.guide, optimiser, Trace_ELBO())
+    svi = SVI(model, guide, optimiser, Trace_ELBO(),config=config,data=data)
     state = svi.init(jax.random.PRNGKey(0))
 
     num_steps = args.steps
@@ -344,8 +468,8 @@ def main():
             if loss < lowest_loss:
                 best_params = svi.get_params(state)
                 lowest_loss = loss
-            if step % 10 == 0 or step == num_steps - 1:
-                results = my_model.get_logging_results(svi.get_params(state))
+            if step % args.log_every == 0 or step == num_steps - 1:
+                results = logger.get_logging_results(svi.get_params(state))
                 results['step'] = step
                 results['loss'] = loss
                 results.move_to_end('loss', last=False)
@@ -376,51 +500,35 @@ def main():
     if to_save.strip().lower() == "y":
         tree2 = input_mod.read_tree(args.tree)
 
-        branch_length_lookup = dict(
-            zip(names_init,
-                my_model.get_branch_times(svi.get_params(state)).tolist()))
-
-        total_lengths_in_time = {}
-
-        total_lengths = dict()
-
-        for i, node in enumerate(helpers.preorder_traversal(tree2.root)):
-
-            if not node.label:
-                node_name = helpers.get_unnnamed_node_label(i)
-                if args.name_all_nodes:
-                    node.label = node_name
-            else:
-                node_name = node.label.replace("'", "")
-            node.edge_length = branch_length_lookup[node_name] / (
-                365 if args.output_unit == "years" else 1)
-            if not node.parent:
-                total_lengths[node] = branch_length_lookup[node_name]
-            else:
-                total_lengths[node] = branch_length_lookup[
-                    node_name] + total_lengths[node.parent]
-
-            if node.label:
-                total_lengths_in_time[node.label.replace(
-                    "'", "")] = total_lengths[node]
+        logger.set_branch_lengths(params,
+                                  tree2,
+                                  names_init,
+                                  output_unit=args.output_unit,
+                                  name_all_nodes=args.name_all_nodes)
+        logger.set_node_attributes(params,
+                                  tree2,
+                                  names_init,
+                                  name_all_nodes=args.name_all_nodes)
+        
+       
 
         print("Writing tree to file")
         tree2.write_tree_newick(args.tree_out)
         print("")
         print(f"Wrote tree to {args.tree_out}")
 
-        origin_date = lookup[reference_point][0]
-        output_dates = {
-            name: origin_date +
-            datetime.timedelta(days=(x + params['root_date_mu'].tolist()))
-            for name, x in total_lengths_in_time.items()
-        }
+        # origin_date = lookup[reference_point][0]
+        # output_dates = {
+        #     name: origin_date +
+        #     datetime.timedelta(days=(x + params['root_date_mu'].tolist()))
+        #     for name, x in total_lengths_in_time.items()
+        # }
 
-        names, values = zip(*output_dates.items())
-        output_meta = pd.DataFrame({"strain": names, "predicted_date": values})
+        # names, values = zip(*output_dates.items())
+        # output_meta = pd.DataFrame({"strain": names, "predicted_date": values})
 
-        output_meta.to_csv(args.dates_out, sep="\t", index=False)
-        print(f"Wrote predicted dates to {args.dates_out}")
+        # output_meta.to_csv(args.dates_out, sep="\t", index=False)
+        # print(f"Wrote predicted dates to {args.dates_out}")
 
 
 if __name__ == "__main__":

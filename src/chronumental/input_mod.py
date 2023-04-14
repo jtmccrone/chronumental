@@ -9,6 +9,7 @@ import xopen
 import lzma
 from . import helpers
 from datetime import datetime as dt
+import jax.numpy as jnp
 
 
 def read_tabular_file(tabular_file_name, **kwargs):
@@ -244,3 +245,93 @@ def get_rows_and_cols_of_sparse_matrix(tree, terminal_name_to_pos,
                 location += 1
                 cur_node = cur_node.parent
     return rows, cols
+
+def get_locations(location_file):
+    # get just the top row of the file
+    metadata = read_tabular_file(location_file, nrows=1)
+    # get the column names
+    metadata_columns = metadata.columns
+    name_column = get_correct_column(
+        metadata_columns, possible_values=["strain", "name", "taxon"])
+    print(
+        f"Using {name_column} as the name column. This must be the name of the taxa in the tree."
+    )
+
+    location_column = get_correct_column(metadata_columns,
+                                     possible_values=["location","loc","lat-lon"])
+
+
+    fields = [location_column, name_column]
+    print(f"Using {fields} as the fields to parse.")
+
+    print("Reading metadata")
+    metadata = read_tabular_file(location_file,
+                                 low_memory=False,
+                                 usecols=fields).rename(columns={
+                                     name_column: 'strain',
+                                     location_column: 'location',
+                                 })
+    
+    if metadata['location'][0][0]=='[':
+        metadata['location'] = metadata['location'].apply(lambda x: [float(y) for y in x[1:-1].split(',')])
+
+    return metadata
+
+
+def get_target_traits(tree, lookup, reference_point):
+    """
+    Returns a list of dictionary mapping names to traits being targeted.
+    values are relative to the value of the reference point, which forms an arbitrary origin.
+    """
+    terminal_targets = {}
+    
+
+    reference_origin = jnp.array(lookup[reference_point][0])
+    for terminal in alive_it(tree.traverse_leaves(),
+                            title=f'Creating target trait array.'):
+                            
+
+        terminal.label = terminal.label.replace("'", "")
+        if terminal.label in lookup: ## todo check has trait
+            loc = jnp.array(lookup[terminal.label][0])
+            diff = loc - reference_origin
+            terminal_targets[terminal.label] = diff
+    return terminal_targets
+
+def process_trait_data(metadata,reference_point,tree,trait='location'):
+        print(f"processing {trait} data")
+        trait_df = metadata[~metadata[trait].isnull()]
+        trait_lookup  = dict(
+                zip(trait_df['strain'], zip(trait_df[trait]))
+                )
+        if reference_point not in trait_lookup:
+            raise ValueError(f"Reference point {reference_point} does not have an entry for trait {trait}.\n \
+                                please provide a reference point with entries for all estimated traits")
+        ## get target traits
+        target_traits = get_target_traits(tree,trait_lookup,reference_point)
+
+        terminal_names = sorted(target_traits.keys())
+
+        terminal_target_locations = jnp.asarray(
+                [target_traits[x] for x in terminal_names])
+        
+        terminal_name_to_pos = {x: i for i, x in enumerate(terminal_names)}
+
+        node_labels = [node.label for node in helpers.preorder_traversal(tree.root)]
+        names_init = sorted(node_labels)
+        name_to_pos = {x: i for i, x in enumerate(names_init)}
+        ## get rows and columns
+        rows, cols = get_rows_and_cols_of_sparse_matrix(
+        tree, terminal_name_to_pos, name_to_pos)
+
+        rows = jnp.asarray(rows)
+        print("Rows array created")
+        cols = jnp.asarray(cols)
+        print("Cols array created")
+
+        return {'name':trait,
+                'rows':rows,
+                'cols':cols,
+                'terminal_target_locations':terminal_target_locations,
+                'origin':jnp.asarray(trait_lookup[reference_point][0])
+                }
