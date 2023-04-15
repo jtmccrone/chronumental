@@ -221,6 +221,11 @@ def get_parser():
         required=False,
         default="AutoDelta"
     )
+    parser.add_argument(
+        '--resolve',
+        help='resolve polytomies before estimation',
+        action='store_true'
+    )
 
     return parser
 
@@ -274,6 +279,9 @@ def main():
 
     print("Reading tree")
     tree = input_mod.read_tree(args.tree)
+    
+    if args.resolve:
+        tree.resolve_polytomies()
 
     print("Processing dates")
     input_mod.process_dates(metadata)
