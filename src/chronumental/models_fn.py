@@ -126,7 +126,7 @@ class BranchModelLogger(Logger):
                 
         return total_lengths_in_time
         
-    def set_node_attributes(self,tree,**kwargs):
+    def set_node_attributes(self,params,tree,names_init,**kwargs):
         return None
 
     def get_branch_times(self, sample):
