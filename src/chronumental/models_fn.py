@@ -123,6 +123,8 @@ class BranchModelLogger(Logger):
             if node.label:
                 total_lengths_in_time[node.label.replace(
                     "'", "")] = total_lengths[node]
+            
+            node.label= "" if (not node.label or not kwargs["name_all_nodes"]) else node.label
                 
         return total_lengths_in_time
         
@@ -205,7 +207,7 @@ class LocationModelLogger(Logger):
                 total_trait_deltas[node]= final_trait
                 trait_string.append(f"location={{{','.join(map(lambda x: str(x),final_trait))}}}")
             if len(trait_string)>0:
-                    base_name= "" if not node.label else node.label
+                    base_name= "" if (not node.label or not kwargs["name_all_nodes"]) else node.label
                     node.label=base_name + f'[&{",".join(trait_string)}]'
 
         return total_trait_deltas
