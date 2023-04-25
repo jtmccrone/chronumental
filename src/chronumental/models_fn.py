@@ -81,7 +81,8 @@ class BranchModelLogger(Logger):
             times)[0, 1]  # This correlation should be relatively high
 
         results['root_date'] = sample['root_date']
-        results['mutation_rate'] = sample['latent_mutation_rate']
+        if 'latent_mutation_rate' in sample:
+            results['mutation_rate'] = sample['latent_mutation_rate']
         return results
 
     def get_logging_results(self,params):
@@ -275,8 +276,10 @@ def branchModel(config,data):
 
 
 
-def locationModel(config,data,branch_times):
-
+def locationModel(config,data,branch_times=None):
+    
+    if  branch_times is None:
+        branch_times=data['branch_times']
     location_dim = data["terminal_target_locations"][0].shape[0]
 
 

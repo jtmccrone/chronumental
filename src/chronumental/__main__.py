@@ -43,6 +43,16 @@ if GPU_REQUESTED and platform == "cpu":
 import argparse
 
 
+import sys
+ 
+# the setrecursionlimit function is
+# used to modify the default recursion
+# limit set by python. Using this,
+# we can increase the recursion limit
+# to satisfy our needs
+ 
+sys.setrecursionlimit(10**6)
+
 def get_parser():
     parser = argparse.ArgumentParser(
         description=
@@ -130,7 +140,7 @@ def get_parser():
     parser.add_argument(
         '--expected_min_between_transmissions',
         default=3,
-        type=int,
+        type=float,
         help=
         "For forming the prior, an expected minimum time between transmissions in days"
     )
@@ -224,6 +234,10 @@ def get_parser():
     parser.add_argument(
         '--resolve',
         help='resolve polytomies before estimation',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--fixed_tree',
         action='store_true'
     )
 
@@ -403,9 +417,11 @@ def main():
         
     branch_config=None
     branch_data=None
-    branchModel=False
-    if args.dates is not None:
-        branchModel=True
+    branchModel= not args.fixed_tree
+    if branchModel:
+
+
+        # branchModel=True
         branch_config={
         "clock_rate": clock_rate,
             "variance_dates": args.variance_dates,
@@ -440,6 +456,7 @@ def main():
         model=models_fn.locationModel
         config=location_config
         data=location_data
+        data['branch_times'] = branch_distances_array
         guide = guiderMaker(model)
         logger = models_fn.LocationModelLogger(guide,data)
         #TODO pass in static branch times here for fixed tree
