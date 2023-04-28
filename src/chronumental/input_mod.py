@@ -298,6 +298,34 @@ def get_target_traits(tree, lookup, reference_point):
             terminal_targets[terminal.label] = diff
     return terminal_targets
 
+
+## TODO we'll need to get the order sorted 
+## expect initial position to be better.
+def get_initial_deltas(tree,target_traits):
+    positions={}
+    initial_deltas={}
+    for node in alive_it(helpers.postorder_traversal(tree.root),title='getting initial location deltas',total = tree.num_nodes()):
+        if node.is_leaf():
+            positions[node.label]=target_traits[node.label]
+        else:
+            lats = []
+            lons = []
+            for child in node.children:
+                lats.append(positions[child.label][0])
+                lons.append(positions[child.label][1])
+            positions[node.label]=jnp.asarray([sum(lats)/len(lats),sum(lons)/len(lons)])
+            for child in node.children:
+                initial_deltas[child.label]=positions[child.label]-positions[node.label]
+
+    #don't do the root above but the root delta is the difference from the reference which is 0,0 
+    initial_deltas[tree.root.label] = -1*positions[tree.root.label]
+    
+
+    return initial_deltas
+    
+
+
+
 def process_trait_data(metadata,reference_point,tree,trait='location'):
         print(f"processing {trait} data")
         trait_df = metadata[~metadata[trait].isnull()]
@@ -310,6 +338,8 @@ def process_trait_data(metadata,reference_point,tree,trait='location'):
         ## get target traits
         target_traits = get_target_traits(tree,trait_lookup,reference_point)
 
+        initial_deltas_dict = get_initial_deltas(tree,target_traits)
+
         terminal_names = sorted(target_traits.keys())
 
         terminal_target_locations = jnp.asarray(
@@ -317,9 +347,10 @@ def process_trait_data(metadata,reference_point,tree,trait='location'):
         
         terminal_name_to_pos = {x: i for i, x in enumerate(terminal_names)}
 
-        node_labels = [node.label for node in helpers.preorder_traversal(tree.root)]
-        names_init = sorted(node_labels)
+        # node_labels = [node.label for node in helpers.preorder_traversal(tree.root)]
+        names_init = sorted(initial_deltas_dict.keys())
         name_to_pos = {x: i for i, x in enumerate(names_init)}
+        initial_deltas= jnp.asarray([initial_deltas_dict[x] for x in names_init])
         ## get rows and columns
         rows, cols = get_rows_and_cols_of_sparse_matrix(
         tree, terminal_name_to_pos, name_to_pos)
@@ -333,5 +364,6 @@ def process_trait_data(metadata,reference_point,tree,trait='location'):
                 'rows':rows,
                 'cols':cols,
                 'terminal_target_locations':terminal_target_locations,
+                'initial_deltas':initial_deltas,
                 'origin':jnp.asarray(trait_lookup[reference_point][0])
                 }

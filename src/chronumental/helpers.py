@@ -11,6 +11,12 @@ def preorder_traversal(node):
     yield node
     for clade in node.children:
         yield from preorder_traversal(clade)
+
+def postorder_traversal(node):
+    for clade in node.children:
+        yield from postorder_traversal(clade)
+    yield node
+
         
 # Credit: Guillem Cucurull http://gcucurull.github.io/deep-learning/2020/06/03/jax-sparse-matrix-multiplication/
 @functools.partial(jax.jit, static_argnums=(2))

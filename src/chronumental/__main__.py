@@ -388,6 +388,7 @@ def main():
     initial_times = jnp.maximum(
             365 * (branch_distances_array) / clock_rate,
             args.expected_min_between_transmissions)
+
     # Model config
     location_data=None
     location_config=None
@@ -450,7 +451,10 @@ def main():
         data={"branchModel":branch_data,"locationModel":location_data}
         guide = guiderMaker(model,init_loc_fn=init_to_value(values={"latent_time_length":initial_times,
                                                            "root_date":-365*ref_point_distance/clock_rate,
-                                                           "latent_mutation_rate":clock_rate}))
+                                                           "latent_mutation_rate":clock_rate,
+                                                           "location_deltas":location_data["initial_deltas"]
+                                                        #    "location_root_delta": jnp.asarray([0.0,0.0])
+                                                           }))
         logger = models_fn.CombinedModelLogger(guide,data)
     elif locationModel:
         model=models_fn.locationModel
